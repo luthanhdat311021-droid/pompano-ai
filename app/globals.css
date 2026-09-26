@@ -305,3 +305,19 @@ button.alert-item > div:nth-child(2) { min-width:0; flex:1; }
 .dark .farm-switcher:hover, .dark .farm-switcher.is-open, .dark .drawer-farms button.selected { border-color:#2f5a5c; }
 .dark .modal-overlay { background:rgba(0,0,0,.55); }
 .app-shell.dark { color-scheme:dark; }
+
+/* AI forecast & environmental report */
+.report-row { display:flex; margin:12px 0 -6px; }
+.report-button { height:31px; font-size:10.5px; color:var(--primary); }
+.forecast-box { margin-top:14px; padding:13px 15px; border-left:3px solid var(--border); background:var(--muted); border-radius:0 7px 7px 0; }
+.forecast-box h3 { font-size:12.5px; line-height:1.4; margin:9px 0 6px; }
+.forecast-detail { font-size:10px; color:var(--muted-foreground); line-height:1.5; margin:0 0 10px; }
+.forecast-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; background:var(--card); border:1px solid var(--border); border-radius:6px; padding:8px 10px; }
+.forecast-grid span, .forecast-grid strong { display:block; }
+.forecast-grid span { font-size:9px; color:var(--muted-foreground); }
+.forecast-grid strong { font-size:13px; margin-top:3px; }
+.forecast-grid strong.bad { color:#c45b4c; }
+.forecast-meta { font-size:9px; color:var(--muted-foreground); margin:6px 0 10px; }
+.aeration-box { font-size:10px; line-height:1.5; border-top:1px solid var(--border); padding-top:9px; margin-bottom:8px; }
+.aeration-box ul { margin:4px 0 0; padding-left:16px; color:var(--muted-foreground); }
+.ai-card .ai-alert { margin-top:16px; }

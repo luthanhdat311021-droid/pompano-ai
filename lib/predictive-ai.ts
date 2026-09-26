@@ -1,200 +1,139 @@
-// Predictive AI Engine for Aquaculture Telemetry & Energy Optimization
-// Calculates 1h/2h/4h forecasts, Nighttime Suffocation Risk, Smart Aeration Control, and VietGAP Traceability.
+// Short-term water quality forecast (2h / 4h) from recent sensor trends.
+//
+// This is a trend extrapolation, not a trained model: a least-squares slope over
+// the last 30 minutes, capped to physically plausible rates, plus extra night-time
+// oxygen consumption (algae respiration). Results are clamped to realistic ranges.
 
 import { LIMITS, type Limits, type Reading } from './telemetry'
 
+type Metric = 'oxygen' | 'ph' | 'temp'
+
 export type MetricForecast = {
   current: number
-  predicted1h: number
-  predicted2h: number
-  predicted4h: number
+  in2h: number
+  in4h: number
   slopePerHour: number
-  trend: 'stable' | 'rising' | 'dropping' | 'dropping_dangerously'
 }
 
-export type PredictivePondInsight = {
+export type RiskLevel = 'safe' | 'warning' | 'critical'
+
+export type PondForecast = {
   pondId: string
+  ready: boolean
+  spanMinutes: number
+  samples: number
   oxygen: MetricForecast
   ph: MetricForecast
   temp: MetricForecast
-  riskLevel: 'safe' | 'warning' | 'critical'
-  riskTitle: string
-  riskDetail: string
-  recommendedAeratorTime: string
-  estimatedPowerSavedKwh: number
-  estimatedMoneySavedVnd: number
-  actionableSteps: string[]
+  risk: RiskLevel
+  title: string
+  detail: string
+  aeration: string
+  steps: string[]
 }
 
-export function predictPondMetrics(
-  pondId: string,
-  readings: Reading[],
-  latest?: Reading,
-  limits: Limits = LIMITS
-): PredictivePondInsight {
-  const current = latest || readings[readings.length - 1]
-  
-  // Default values if insufficient history
-  if (!current || readings.length < 3) {
-    const fallback: MetricForecast = {
-      current: current?.oxygen ?? 6.0,
-      predicted1h: current?.oxygen ?? 6.0,
-      predicted2h: current?.oxygen ?? 6.0,
-      predicted4h: current?.oxygen ?? 6.0,
-      slopePerHour: 0,
-      trend: 'stable'
-    }
-    return {
-      pondId,
-      oxygen: fallback,
-      ph: { ...fallback, current: current?.ph ?? 7.8, predicted1h: 7.8, predicted2h: 7.8, predicted4h: 7.8 },
-      temp: { ...fallback, current: current?.temp ?? 28.0, predicted1h: 28.0, predicted2h: 28.0, predicted4h: 28.0 },
-      riskLevel: 'safe',
-      riskTitle: 'Đang thu thập dữ liệu chuỗi thời gian',
-      riskDetail: 'Hệ thống đang tích lũy thêm các bản ghi cảm biến để tính toán đường cong xu hướng AI chính xác.',
-      recommendedAeratorTime: 'Tự động theo lịch cố định (22:00 - 04:00)',
-      estimatedPowerSavedKwh: 0,
-      estimatedMoneySavedVnd: 0,
-      actionableSteps: ['Duy trì vận hành bình thường', 'Đảm bảo thiết bị ESP32 gửi dữ liệu liên tục']
-    }
-  }
+const HOUR = 3_600_000
+const WINDOW_MS = 30 * 60_000
+export const MIN_SPAN_MS = 10 * 60_000
+const MIN_SAMPLES = 30
+// Fastest changes that are realistic for a pond, per hour. Steeper fitted slopes are sensor noise.
+const MAX_SLOPE: Record<Metric, number> = { oxygen: 0.8, ph: 0.15, temp: 1 }
+const BOUNDS: Record<Metric, [number, number]> = { oxygen: [0, 15], ph: [6, 10], temp: [15, 40] }
+const NIGHT_OXYGEN_DROP = 0.15 // extra mg/L per hour between 21:00 and 05:00
 
-  // Calculate Linear Regression slope over recent window (last 20 readings or last 30 minutes)
-  const window = readings.slice(-60)
-  const startTime = window[0].ts
-  
-  function getSlope(metric: 'oxygen' | 'ph' | 'temp') {
-    let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0
-    const n = window.length
-    for (const r of window) {
-      const x = (r.ts - startTime) / 3600000 // in hours
-      const y = r[metric]
-      sumX += x
-      sumY += y
-      sumXY += x * y
-      sumXX += x * x
-    }
-    const denominator = n * sumXX - sumX * sumX
-    if (Math.abs(denominator) < 1e-6) return 0
-    return (n * sumXY - sumX * sumY) / denominator // unit change per hour
-  }
+const clamp = (value: number, [min, max]: [number, number]) => Math.min(max, Math.max(min, value))
+const round = (value: number, digits: number) => Number(value.toFixed(digits))
 
-  // Diurnal bio-oxygen demand adjustment (oxygen drops faster during 22:00 - 05:00 due to algae respiration)
-  const currentHour = new Date().getHours()
-  const isNight = currentHour >= 21 || currentHour <= 5
-  const nightOxyDrift = isNight ? -0.15 : 0 // extra DO drop per hour at night
-
-  const oxySlope = getSlope('oxygen') + nightOxyDrift
-  const phSlope = getSlope('ph')
-  const tempSlope = getSlope('temp')
-
-  const oxy1h = Math.max(0, current.oxygen + oxySlope * 1)
-  const oxy2h = Math.max(0, current.oxygen + oxySlope * 2)
-  const oxy4h = Math.max(0, current.oxygen + oxySlope * 4)
-
-  const ph1h = Math.min(14, Math.max(0, current.ph + phSlope * 1))
-  const ph2h = Math.min(14, Math.max(0, current.ph + phSlope * 2))
-  const ph4h = Math.min(14, Math.max(0, current.ph + phSlope * 4))
-
-  const temp1h = current.temp + tempSlope * 1
-  const temp2h = current.temp + tempSlope * 2
-  const temp4h = current.temp + tempSlope * 4
-
-  const oxyTrend = oxySlope < -0.3 ? 'dropping_dangerously' : oxySlope < -0.05 ? 'dropping' : oxySlope > 0.05 ? 'rising' : 'stable'
-  const phTrend = phSlope < -0.1 ? 'dropping' : phSlope > 0.1 ? 'rising' : 'stable'
-  const tempTrend = tempSlope < -0.2 ? 'dropping' : tempSlope > 0.2 ? 'rising' : 'stable'
-
-  const oxygenForecast: MetricForecast = {
-    current: current.oxygen,
-    predicted1h: Number(oxy1h.toFixed(2)),
-    predicted2h: Number(oxy2h.toFixed(2)),
-    predicted4h: Number(oxy4h.toFixed(2)),
-    slopePerHour: Number(oxySlope.toFixed(2)),
-    trend: oxyTrend
-  }
-
-  const phForecast: MetricForecast = {
-    current: current.ph,
-    predicted1h: Number(ph1h.toFixed(2)),
-    predicted2h: Number(ph2h.toFixed(2)),
-    predicted4h: Number(ph4h.toFixed(2)),
-    slopePerHour: Number(phSlope.toFixed(2)),
-    trend: phTrend
-  }
-
-  const tempForecast: MetricForecast = {
-    current: current.temp,
-    predicted1h: Number(temp1h.toFixed(1)),
-    predicted2h: Number(temp2h.toFixed(1)),
-    predicted4h: Number(temp4h.toFixed(1)),
-    slopePerHour: Number(tempSlope.toFixed(2)),
-    trend: tempTrend
-  }
-
-  // Risk evaluation
-  let riskLevel: 'safe' | 'warning' | 'critical' = 'safe'
-  let riskTitle = 'Chỉ số ổn định & An toàn'
-  let riskDetail = 'Thuật toán AI dự báo chất lượng nước sẽ tiếp tục duy trì trong ngưỡng tối ưu trong 4 giờ tới.'
-  let recommendedAeratorTime = 'Chạy sục khí duy trì 2-3 tiếng/đêm (02:00 - 05:00)'
-  let actionableSteps = [
-    'Duy trì lịch cho ăn tiêu chuẩn',
-    'AI chưa phát hiện nguy cơ ngạt khí ban đêm'
-  ]
-
-  if (oxy2h < limits.oxygen.dangerMin || oxy4h < 3.8) {
-    riskLevel = 'critical'
-    riskTitle = '🚨 NGUY CƠ TỤT OXY NGHÊM TRỌNG TRONG 2-4 GIỜ TỚI'
-    riskDetail = `Mô hình AI phát hiện tốc độ giảm Oxy (${oxySlope.toFixed(2)} mg/L/giờ). Dự báo Oxy sẽ rơi xuống ${oxy2h.toFixed(2)} mg/L lúc ${getFutureTimeString(2)} (ngưỡng nguy hiểm < ${limits.oxygen.dangerMin} mg/L).`
-    recommendedAeratorTime = 'KÍCH HOẠT QUẠT NƯỚC NGAY LẬP TỨC (Chạy tối đa công suất)'
-    actionableSteps = [
-      'Bật bổ sung tất cả dàn quạt nước sục khí lập tức',
-      'Cắt giảm 50% lượng thức ăn đợt tiếp theo để tránh tiêu thụ oxy sinh học (BOD)',
-      'Tạt oxy viên cấp cứu (Sodium Percarbonate) nếu oxy xuống dưới 3.5 mg/L'
-    ]
-  } else if (oxy4h < limits.oxygen.min || oxySlope < -0.15) {
-    riskLevel = 'warning'
-    riskTitle = '⚠️ XU HƯỚNG GIẢM OXY BAN ĐÊM (CẦN CHÚ Ý)'
-    riskDetail = `Dự báo Oxy hòa tan sẽ giảm xuống ${oxy4h.toFixed(2)} mg/L trong 4 giờ tới. Cần chủ động bật sục khí sớm hơn lịch cố định.`
-    recommendedAeratorTime = `Bật quạt nước tự động lúc ${getFutureTimeString(1.5)} đến 06:00 sáng`
-    actionableSteps = [
-      'Cài đặt hẹn giờ bật quạt nước tự động từ 23:00',
-      'Theo dõi sát chỉ số trên Dashboard trong 60 phút tới'
-    ]
-  } else if (ph4h > limits.ph.max || ph4h < limits.ph.min) {
-    riskLevel = 'warning'
-    riskTitle = '⚠️ DỰ BÁO BIẾN ĐỘNG pH NƯỚC'
-    riskDetail = `pH đang có xu hướng ${phSlope > 0 ? 'tăng vọt' : 'tụt giảm'} (${phSlope.toFixed(2)}/giờ). Dự báo đạt ${ph4h.toFixed(2)} trong 4h tới.`
-    recommendedAeratorTime = 'Vận hành sục khí bình thường'
-    actionableSteps = [
-      phSlope > 0 ? 'Tạt mật đường hoặc vi sinh lúc 8-9h sáng để hạ pH' : 'Tạt vôi nông nghiệp CaCO3 (10-15kg/1000m3) để nâng pH'
-    ]
-  }
-
-  // Energy savings calculation:
-  // Standard fixed schedule = 8 hours aerator running per night (approx 3.75 kW motor = 30 kWh)
-  // Smart AI Aeration = Runs only when DO is predicted < 5.2 mg/L (avg 5.5 hours = 20.6 kWh)
-  // Saved ~ 9.4 kWh/day per pond -> ~282 kWh/month -> ~700,000 VND/month/pond
-  const hoursSavedPerDay = riskLevel === 'safe' ? 2.5 : riskLevel === 'warning' ? 1.5 : 0
-  const kwMotor = 3.75 // Standard 5HP paddlewheel aerator
-  const estimatedPowerSavedKwh = Number((hoursSavedPerDay * kwMotor * 30).toFixed(0))
-  const estimatedMoneySavedVnd = estimatedPowerSavedKwh * 2500 // ~2500 VND per kWh commercial rate
-
-  return {
-    pondId,
-    oxygen: oxygenForecast,
-    ph: phForecast,
-    temp: tempForecast,
-    riskLevel,
-    riskTitle,
-    riskDetail,
-    recommendedAeratorTime,
-    estimatedPowerSavedKwh,
-    estimatedMoneySavedVnd,
-    actionableSteps
-  }
+function isNight(ts: number) {
+  const hour = new Date(ts).getHours()
+  return hour >= 21 || hour < 5
 }
 
-function getFutureTimeString(hoursAhead: number): string {
-  const d = new Date(Date.now() + hoursAhead * 3600000)
-  return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+// Extra oxygen consumed by night-time respiration over the next `hours`, in 15-minute steps.
+function nightDrift(from: number, hours: number) {
+  let drift = 0
+  for (let t = 0; t < hours; t += 0.25) if (isNight(from + t * HOUR)) drift -= NIGHT_OXYGEN_DROP * 0.25
+  return drift
+}
+
+function slope(window: Reading[], metric: Metric) {
+  const t0 = window[0].ts
+  let sx = 0, sy = 0, sxy = 0, sxx = 0
+  for (const reading of window) {
+    const x = (reading.ts - t0) / HOUR
+    sx += x; sy += reading[metric]; sxy += x * reading[metric]; sxx += x * x
+  }
+  const n = window.length
+  const denominator = n * sxx - sx * sx
+  if (Math.abs(denominator) < 1e-9) return 0
+  const raw = (n * sxy - sx * sy) / denominator
+  return Math.max(-MAX_SLOPE[metric], Math.min(MAX_SLOPE[metric], raw))
+}
+
+function formatClock(ts: number) {
+  return new Date(ts).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+export function forecastPond(pondId: string, readings: Reading[], limits: Limits = LIMITS): PondForecast {
+  const last = readings.at(-1)
+  const window = last ? readings.filter((reading) => reading.ts >= last.ts - WINDOW_MS) : []
+  const spanMs = window.length ? window[window.length - 1].ts - window[0].ts : 0
+  // Average the last minute so a single noisy reading doesn't move the forecast.
+  const recent = last ? window.filter((reading) => reading.ts >= last.ts - 60_000) : []
+  const mean = (metric: Metric) => recent.reduce((sum, reading) => sum + reading[metric], 0) / (recent.length || 1)
+
+  const build = (metric: Metric, digits: number, ready: boolean): MetricForecast => {
+    const current = last ? mean(metric) : NaN
+    if (!ready) return { current: round(current, digits), in2h: NaN, in4h: NaN, slopePerHour: 0 }
+    const rate = slope(window, metric)
+    const at = (hours: number) => round(clamp(current + rate * hours + (metric === 'oxygen' ? nightDrift(last!.ts, hours) : 0), BOUNDS[metric]), digits)
+    return { current: round(current, digits), in2h: at(2), in4h: at(4), slopePerHour: round(rate, 2) }
+  }
+
+  const ready = !!last && spanMs >= MIN_SPAN_MS && window.length >= MIN_SAMPLES
+  const oxygen = build('oxygen', 2, ready)
+  const ph = build('ph', 2, ready)
+  const temp = build('temp', 1, ready)
+  const base = { pondId, ready, spanMinutes: Math.floor(spanMs / 60_000), samples: window.length, oxygen, ph, temp }
+
+  if (!ready) {
+    return { ...base, risk: 'safe', title: 'Đang thu thập dữ liệu', detail: `Cần ít nhất ${MIN_SPAN_MS / 60_000} phút dữ liệu liên tục để ước tính xu hướng (hiện có ${base.spanMinutes} phút).`, aeration: 'Vận hành quạt nước theo lịch thường', steps: [] }
+  }
+
+  const now = last!.ts
+  // First time (within 4h) the oxygen forecast drops below `threshold`.
+  const crossing = (threshold: number) => {
+    for (let h = 0; h <= 4; h += 0.25) {
+      const value = oxygen.current + oxygen.slopePerHour * h + nightDrift(now, h)
+      if (value < threshold) return now + h * HOUR
+    }
+    return null
+  }
+
+  if (oxygen.in2h < limits.oxygen.dangerMin) {
+    const at = crossing(limits.oxygen.dangerMin)
+    return { ...base, risk: 'critical', title: 'Nguy cơ thiếu oxy trong 2 giờ tới', detail: `Oxy đang giảm ${Math.abs(oxygen.slopePerHour).toFixed(2)} mg/L/giờ, ước tính còn ${oxygen.in2h.toFixed(2)} mg/L sau 2 giờ${at ? `, xuống dưới ngưỡng nguy hiểm ${limits.oxygen.dangerMin} mg/L khoảng ${formatClock(at)}` : ''}.`, aeration: 'Bật toàn bộ quạt nước ngay', steps: ['Bật tất cả quạt nước / máy sục khí', 'Tạm giảm 50% thức ăn cữ tiếp theo', 'Chuẩn bị oxy viên nếu oxy xuống dưới 3.5 mg/L'] }
+  }
+  if (oxygen.in4h < limits.oxygen.min) {
+    const at = crossing(limits.oxygen.min)
+    return { ...base, risk: 'warning', title: 'Oxy có xu hướng giảm', detail: `Ước tính oxy còn ${oxygen.in4h.toFixed(2)} mg/L sau 4 giờ, dưới mức tối thiểu ${limits.oxygen.min} mg/L.`, aeration: at ? `Bật quạt nước sớm, trước ${formatClock(at)}` : 'Bật quạt nước sớm hơn lịch thường', steps: ['Bật quạt nước sớm hơn lịch', 'Theo dõi oxy trong 60 phút tới'] }
+  }
+  if (ph.in4h > limits.ph.max || ph.in4h < limits.ph.min) {
+    const rising = ph.slopePerHour > 0
+    return { ...base, risk: 'warning', title: `pH có xu hướng ${rising ? 'tăng' : 'giảm'}`, detail: `pH thay đổi ${ph.slopePerHour > 0 ? '+' : ''}${ph.slopePerHour.toFixed(2)}/giờ, ước tính đạt ${ph.in4h.toFixed(2)} sau 4 giờ (ngưỡng ${limits.ph.min}–${limits.ph.max}).`, aeration: 'Vận hành quạt nước theo lịch thường', steps: [rising ? 'Cân nhắc tạt mật đường hoặc vi sinh để hạ pH' : 'Cân nhắc bón vôi CaCO₃ để nâng pH'] }
+  }
+  if (temp.in4h > limits.temp.max || temp.in4h < limits.temp.min) {
+    const rising = temp.slopePerHour > 0
+    return { ...base, risk: 'warning', title: `Nhiệt độ có xu hướng ${rising ? 'tăng' : 'giảm'}`, detail: `Ước tính ${temp.in4h.toFixed(1)}°C sau 4 giờ (ngưỡng ${limits.temp.min}–${limits.temp.max}°C).`, aeration: rising ? 'Tăng sục khí vào giờ nắng gắt' : 'Vận hành quạt nước theo lịch thường', steps: [rising ? 'Cấp thêm nước mới hoặc che mát' : 'Hạn chế thay nước vào ban đêm'] }
+  }
+  return { ...base, risk: 'safe', title: 'Ổn định trong 4 giờ tới', detail: 'Xu hướng hiện tại cho thấy các chỉ số vẫn nằm trong ngưỡng an toàn.', aeration: isNight(now) ? 'Duy trì quạt nước theo lịch ban đêm' : 'Vận hành quạt nước theo lịch thường', steps: [] }
+}
+
+const RISK_RANK: Record<RiskLevel, number> = { critical: 0, warning: 1, safe: 2 }
+
+// The pond most in need of attention: highest risk first, then lowest forecast oxygen.
+export function riskiestForecast(forecasts: PondForecast[]) {
+  const ready = forecasts.filter((forecast) => forecast.ready)
+  const pool = ready.length ? ready : forecasts
+  return [...pool].sort((a, b) => RISK_RANK[a.risk] - RISK_RANK[b.risk] || (a.oxygen.in4h || Infinity) - (b.oxygen.in4h || Infinity))[0]
 }

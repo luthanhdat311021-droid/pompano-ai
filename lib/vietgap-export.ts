@@ -1,180 +1,186 @@
-// VietGAP Environmental Audit & Traceability Report Generator
-// Generates official printable audit reports and QR codes for consumer transparency.
+// Printable environmental log for one pond, to support a VietGAP record-keeping file.
+//
+// Every figure comes from the system's own data (sensor history, feed and health logs).
+// It is an internal report, not a certificate: VietGAP certification is only issued
+// by accredited certification bodies.
 
-import type { Reading } from './telemetry'
+import type { FeedLog, HealthLog, Notice, Pond } from './farm-store'
+import type { Limits, Reading } from './telemetry'
 
-export type VietGAPReportData = {
+const DAY = 86_400_000
+
+export type EnvironmentReport = {
+  reportId: string
+  generatedAt: number
   farmName: string
-  location: string
-  pondId: string
-  pondName: string
-  fishSpecies: string
-  stockingDate: string
-  fishCount: number
-  avgWeightGram: number
-  waterQualitySummary: {
-    avgPh: number
-    minPh: number
-    maxPh: number
-    avgTemp: number
-    avgOxygen: number
-    minOxygen: number
-    totalReadings: number
-    complianceRatePercent: number
-  }
-  feedSummary: {
-    totalFeedKg: number
-    fcrRatio: number
-  }
-  certCode: string
-  issuedDate: string
+  pond: Pond
+  limits: Limits
+  sensor: {
+    samples: number
+    spanMinutes: number
+    ph: { avg: number; min: number; max: number }
+    temp: { avg: number; min: number; max: number }
+    oxygen: { avg: number; min: number; max: number }
+    compliancePercent: number
+  } | null
+  feed: { totalKg: number; last7DaysKg: number; entries: number }
+  fcr: number | null
+  latestHealth: HealthLog | null
+  healthLogs: HealthLog[]
+  alerts: Notice[]
 }
 
-export function buildVietGAPData(
-  pondId: string,
-  pondName: string,
-  readings: Reading[],
-  fishCount: number,
-  area: number
-): VietGAPReportData {
-  const phs = readings.map((r) => r.ph).filter(Number.isFinite)
-  const temps = readings.map((r) => r.temp).filter(Number.isFinite)
-  const oxygens = readings.map((r) => r.oxygen).filter(Number.isFinite)
+function stats(values: number[]) {
+  const avg = values.reduce((a, b) => a + b, 0) / values.length
+  return { avg, min: Math.min(...values), max: Math.max(...values) }
+}
 
-  const avgPh = phs.length ? phs.reduce((a, b) => a + b, 0) / phs.length : 7.8
-  const minPh = phs.length ? Math.min(...phs) : 7.5
-  const maxPh = phs.length ? Math.max(...phs) : 8.2
+// FCR = feed used / biomass gained between the first and last weighings. Needs two weighings.
+function estimateFcr(pond: Pond, health: HealthLog[], feed: FeedLog[]) {
+  if (health.length < 2) return null
+  const first = health[0]
+  const last = health[health.length - 1]
+  const gainKg = ((last.weight - first.weight) / 1000) * pond.fish
+  const feedKg = feed.filter((log) => log.ts >= first.ts && log.ts <= last.ts).reduce((sum, log) => sum + log.kg, 0)
+  return gainKg > 0 && feedKg > 0 ? feedKg / gainKg : null
+}
 
-  const avgTemp = temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : 28.5
-  const avgOxygen = oxygens.length ? oxygens.reduce((a, b) => a + b, 0) / oxygens.length : 6.1
-  const minOxygen = oxygens.length ? Math.min(...oxygens) : 5.2
-
-  // Compliance: pH [7.5, 8.5], Oxygen >= 5.0
-  const compliantCount = readings.filter((r) => r.ph >= 7.5 && r.ph <= 8.5 && r.oxygen >= 5.0).length
-  const complianceRatePercent = readings.length ? Math.round((compliantCount / readings.length) * 100) : 98
-
-  const certCode = `VG-TRV-${pondId}-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`
+export function buildEnvironmentReport(input: { farmName: string; pond: Pond; readings: Reading[]; limits: Limits; feedLogs: FeedLog[]; healthLogs: HealthLog[]; notices: Notice[] }): EnvironmentReport {
+  const { pond, readings, limits } = input
+  const generatedAt = Date.now()
+  const stockedAt = new Date(pond.stockedAt).getTime() || 0
+  const feed = input.feedLogs.filter((log) => log.pondId === pond.id && log.ts >= stockedAt).sort((a, b) => a.ts - b.ts)
+  const health = input.healthLogs.filter((log) => log.pondId === pond.id).sort((a, b) => a.ts - b.ts)
+  const compliant = readings.filter((r) => r.ph >= limits.ph.min && r.ph <= limits.ph.max && r.temp >= limits.temp.min && r.temp <= limits.temp.max && r.oxygen >= limits.oxygen.min).length
+  const stamp = new Date(generatedAt)
+  const pad = (n: number) => String(n).padStart(2, '0')
 
   return {
-    farmName: 'Trang trại Nuôi Cá Chim Vây Vàng Pompano - Trà Vinh',
-    location: 'Xã Dân Thành, Thị xã Duyên Hải, Tỉnh Trà Vinh',
-    pondId,
-    pondName,
-    fishSpecies: 'Cá chim vây vàng (Trachinotus blochii)',
-    stockingDate: '15/05/2026',
-    fishCount,
-    avgWeightGram: 450,
-    waterQualitySummary: {
-      avgPh: Number(avgPh.toFixed(2)),
-      minPh: Number(minPh.toFixed(2)),
-      maxPh: Number(maxPh.toFixed(2)),
-      avgTemp: Number(avgTemp.toFixed(1)),
-      avgOxygen: Number(avgOxygen.toFixed(2)),
-      minOxygen: Number(minOxygen.toFixed(2)),
-      totalReadings: readings.length || 1800,
-      complianceRatePercent
+    reportId: `BC-${pond.id}-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${pad(stamp.getHours())}${pad(stamp.getMinutes())}`,
+    generatedAt,
+    farmName: input.farmName,
+    pond,
+    limits,
+    sensor: readings.length ? {
+      samples: readings.length,
+      spanMinutes: Math.round((readings[readings.length - 1].ts - readings[0].ts) / 60_000),
+      ph: stats(readings.map((r) => r.ph)),
+      temp: stats(readings.map((r) => r.temp)),
+      oxygen: stats(readings.map((r) => r.oxygen)),
+      compliancePercent: (compliant / readings.length) * 100,
+    } : null,
+    feed: {
+      totalKg: feed.reduce((sum, log) => sum + log.kg, 0),
+      last7DaysKg: feed.filter((log) => log.ts >= generatedAt - 7 * DAY).reduce((sum, log) => sum + log.kg, 0),
+      entries: feed.length,
     },
-    feedSummary: {
-      totalFeedKg: Math.round(fishCount * 0.45 * 1.3), // FCR ~ 1.3
-      fcrRatio: 1.28
-    },
-    certCode,
-    issuedDate: new Date().toLocaleDateString('vi-VN')
+    fcr: estimateFcr(pond, health, feed),
+    latestHealth: health.at(-1) ?? null,
+    healthLogs: health.slice(-10).reverse(),
+    alerts: input.notices.filter((notice) => notice.pondId === pond.id).slice(0, 15),
   }
 }
 
-export function openPrintableVietGAPReport(data: VietGAPReportData) {
-  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(
-    `https://pompano.ai/verify/${data.certCode}`
-  )}`
+const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
+const num = (value: number, digits = 0) => value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+const dateTime = (ts: number) => new Date(ts).toLocaleString('vi-VN', { hour12: false })
+const CONDITION: Record<HealthLog['condition'], string> = { good: 'Khỏe mạnh', watch: 'Cần theo dõi', sick: 'Có dấu hiệu bệnh' }
+const LEVEL: Record<Notice['level'], string> = { danger: 'Nguy hiểm', warning: 'Cảnh báo', info: 'Thông tin' }
 
-  const html = `
-<!DOCTYPE html>
+export function renderEnvironmentReport(report: EnvironmentReport) {
+  const { pond, sensor, limits } = report
+  const e = escapeHtml
+  const row = (label: string, value: string) => `<div class="row"><span>${label}</span><strong>${value}</strong></div>`
+  const days = Math.max(0, Math.floor((report.generatedAt - new Date(pond.stockedAt).getTime()) / DAY))
+
+  return `<!DOCTYPE html>
 <html lang="vi">
 <head>
-  <meta charset="UTF-8">
-  <title>Báo Cáo Nhật Ký & Nhật Ký Truy Xuất Nguồn Gốc VietGAP - ${data.pondName}</title>
-  <style>
-    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 30px; color: #1e293b; background: #f8fafc; }
-    .cert-container { max-width: 800px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 12px; border: 2px solid #0284c7; box-shadow: 0 10px 25px rgba(0,0,0,0.08); }
-    .header { text-align: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 20px; margin-bottom: 25px; }
-    .header h1 { color: #0369a1; font-size: 24px; margin: 5px 0; text-transform: uppercase; letter-spacing: 1px; }
-    .header p { color: #64748b; font-size: 14px; margin: 0; }
-    .badge { display: inline-block; background: #e0f2fe; color: #0369a1; font-weight: bold; padding: 4px 12px; border-radius: 20px; font-size: 13px; margin-top: 10px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px; }
-    .box { background: #f1f5f9; padding: 15px 20px; border-radius: 8px; border-left: 4px solid #0284c7; }
-    .box h3 { margin: 0 0 10px 0; font-size: 15px; color: #334155; }
-    .row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 14px; }
-    .row label { color: #64748b; }
-    .row value { font-weight: 600; color: #0f172a; }
-    .qr-section { display: flex; align-items: center; justify-content: space-between; background: #eff6ff; padding: 20px; border-radius: 8px; margin-top: 20px; border: 1px dashed #60a5fa; }
-    .qr-text { max-width: 70%; }
-    .qr-text h4 { margin: 0 0 6px 0; color: #1e40af; font-size: 16px; }
-    .qr-text p { margin: 0; font-size: 13px; color: #3b82f6; }
-    .footer { text-align: center; margin-top: 30px; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 15px; }
-    @media print {
-      body { background: #fff; padding: 0; }
-      .cert-container { box-shadow: none; border-color: #000; }
-      .no-print { display: none; }
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Nhật ký môi trường ${e(pond.name)} - ${e(report.reportId)}</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 28px; color: #17313a; background: #f5f7f8; }
+  .sheet { max-width: 820px; margin: 0 auto; background: #fff; padding: 32px 36px; border: 1px solid #dfe8e9; border-radius: 10px; }
+  header { border-bottom: 2px solid #127f83; padding-bottom: 14px; margin-bottom: 20px; display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; }
+  h1 { font-size: 20px; margin: 0 0 4px; color: #127f83; }
+  header p { margin: 0; font-size: 12px; color: #71838a; }
+  .meta { text-align: right; font-size: 12px; color: #71838a; line-height: 1.6; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+  .box { border: 1px solid #dfe8e9; border-radius: 8px; padding: 14px 16px; }
+  h2 { font-size: 13px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .04em; color: #127f83; }
+  .row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; border-bottom: 1px dashed #eef3f4; }
+  .row span { color: #71838a; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; background: #eef3f4; color: #71838a; padding: 7px 8px; font-weight: 600; }
+  td { padding: 7px 8px; border-top: 1px solid #eef3f4; }
+  section { margin-bottom: 18px; }
+  .muted { color: #71838a; font-size: 12px; }
+  .note { font-size: 11px; color: #71838a; border-top: 1px solid #dfe8e9; padding-top: 12px; margin-top: 22px; line-height: 1.6; }
+  .actions { text-align: center; margin-bottom: 16px; }
+  .actions button { background: #127f83; color: #fff; border: 0; padding: 9px 20px; font-size: 13px; font-weight: 700; border-radius: 6px; cursor: pointer; }
+  @media print { body { background: #fff; padding: 0; } .sheet { border: 0; padding: 0; } .actions { display: none; } }
+</style>
 </head>
 <body>
-  <div class="no-print" style="text-align: center; margin-bottom: 20px;">
-    <button onclick="window.print()" style="background: #0284c7; color: white; border: none; padding: 10px 24px; font-size: 15px; font-weight: bold; border-radius: 6px; cursor: pointer;">🖨️ In Báo Cáo / Tải PDF VietGAP</button>
-  </div>
-  <div class="cert-container">
-    <div class="header">
-      <p style="color: #166534; font-weight: bold; font-size: 13px; text-transform: uppercase;">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM — ĐỘC LẬP - TỰ DO - HẠNH PHÚC</p>
-      <h1>BÁO CÁO NHẬT KÝ MÔI TRƯỜNG & TRUY XUẤT NGUỒN GỐC VIETGAP</h1>
-      <p>Hệ Thống Quản Lý AIoT Giám Sát Tự Động Pompano AI Platform</p>
-      <div class="badge">Mã Chứng Nhận: ${data.certCode}</div>
+<div class="actions"><button onclick="window.print()">In / Lưu PDF</button></div>
+<div class="sheet">
+  <header>
+    <div><h1>Nhật ký môi trường ao nuôi</h1><p>Tài liệu hỗ trợ hồ sơ ghi chép VietGAP · Tạo tự động bởi Pompano AI</p></div>
+    <div class="meta">Mã báo cáo: <strong>${e(report.reportId)}</strong><br>Ngày lập: ${dateTime(report.generatedAt)}</div>
+  </header>
+
+  <div class="grid">
+    <div class="box"><h2>Thông tin ao nuôi</h2>
+      ${row('Trang trại', e(report.farmName))}
+      ${row('Ao nuôi', `${e(pond.name)} (${e(pond.id)})`)}
+      ${row('Ngày thả giống', new Date(pond.stockedAt).toLocaleDateString('vi-VN'))}
+      ${row('Số ngày nuôi', `${days} ngày`)}
+      ${row('Số cá hiện có', `${num(pond.fish)} con`)}
+      ${row('Diện tích', `${num(pond.area)} m²`)}
+      ${row('Trọng lượng TB', report.latestHealth ? `${num(report.latestHealth.weight)} g/con (${new Date(report.latestHealth.ts).toLocaleDateString('vi-VN')})` : 'Chưa cân mẫu')}
     </div>
-
-    <div class="grid">
-      <div class="box">
-        <h3>📍 THÔNG TIN LÔ THU HOẠCH</h3>
-        <div class="row"><label>Trang trại:</label><value>${data.farmName}</value></div>
-        <div class="row"><label>Địa điểm:</label><value>${data.location}</value></div>
-        <div class="row"><label>Ao nuôi:</label><value>${data.pondName} (${data.pondId})</value></div>
-        <div class="row"><label>Đối tượng nuôi:</label><value>${data.fishSpecies}</value></div>
-        <div class="row"><label>Ngày thả giống:</label><value>${data.stockingDate}</value></div>
-        <div class="row"><label>Số lượng thả:</label><value>${data.fishCount.toLocaleString()} con</value></div>
-        <div class="row"><label>Trọng lượng TB:</label><value>${data.avgWeightGram} g/con</value></div>
-      </div>
-
-      <div class="box" style="border-left-color: #16a34a;">
-        <h3>📊 GIÁM SÁT CHẤT LƯỢNG NƯỚC (IoT TELEMETRY)</h3>
-        <div class="row"><label>pH Trung Bình:</label><value>${data.waterQualitySummary.avgPh} (Min: ${data.waterQualitySummary.minPh} - Max: ${data.waterQualitySummary.maxPh})</value></div>
-        <div class="row"><label>Nhiệt độ TB:</label><value>${data.waterQualitySummary.avgTemp} °C</value></div>
-        <div class="row"><label>Oxy Hòa Tan (DO) TB:</label><value>${data.waterQualitySummary.avgOxygen} mg/L</value></div>
-        <div class="row"><label>Mức Oxy Thấp Nhất:</label><value>${data.waterQualitySummary.minOxygen} mg/L</value></div>
-        <div class="row"><label>Tổng số bản ghi IoT:</label><value>${data.waterQualitySummary.totalReadings.toLocaleString()} mẫu liên tục</value></div>
-        <div class="row"><label>Tỷ lệ đạt chuẩn VietGAP:</label><value style="color: #16a34a; font-weight: bold;">${data.waterQualitySummary.complianceRatePercent}%</value></div>
-        <div class="row"><label>Hệ số FCR thức ăn:</label><value>${data.feedSummary.fcrRatio}</value></div>
-      </div>
-    </div>
-
-    <div class="qr-section">
-      <div class="qr-text">
-        <h4>🔍 QUÉT MÃ QR ĐỂ TRUY XUẤT NGUỒN GỐC THỰC TẾ</h4>
-        <p>Mã QR này chứa toàn bộ nhật ký cảm biến thời gian thực, lịch cho ăn và hồ sơ sức khỏe cá được xác thực bởi Pompano AI Engine.</p>
-        <p style="margin-top: 6px; font-size: 12px; color: #475569;">Ngày cấp báo cáo: ${data.issuedDate}</p>
-      </div>
-      <img src="${qrUrl}" alt="Mã QR Truy Xuất VietGAP" style="border: 4px solid #fff; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);" />
-    </div>
-
-    <div class="footer">
-      <p>Hệ thống Pompano AI Platform — Nghiên Cứu & Phát Triển Ứng Dụng Nông Nghiệp Thông Minh ĐBSCL</p>
+    <div class="box"><h2>Chất lượng nước (cảm biến IoT)</h2>
+      ${sensor ? `
+      ${row('pH TB (min – max)', `${num(sensor.ph.avg, 2)} (${num(sensor.ph.min, 2)} – ${num(sensor.ph.max, 2)})`)}
+      ${row('Nhiệt độ TB (min – max)', `${num(sensor.temp.avg, 1)} (${num(sensor.temp.min, 1)} – ${num(sensor.temp.max, 1)}) °C`)}
+      ${row('Oxy hòa tan TB (min)', `${num(sensor.oxygen.avg, 2)} (${num(sensor.oxygen.min, 2)}) mg/L`)}
+      ${row('Số mẫu', `${num(sensor.samples)} mẫu trong ${sensor.spanMinutes} phút`)}
+      ${row('Tỷ lệ mẫu trong ngưỡng', `${num(sensor.compliancePercent, 1)}%`)}
+      <p class="muted">Ngưỡng áp dụng: pH ${limits.ph.min}–${limits.ph.max}, nhiệt độ ${limits.temp.min}–${limits.temp.max} °C, oxy ≥ ${limits.oxygen.min} mg/L. Hệ thống hiện chỉ lưu khoảng 1 giờ dữ liệu cảm biến gần nhất.</p>` : '<p class="muted">Chưa có dữ liệu cảm biến cho ao này.</p>'}
     </div>
   </div>
+
+  <div class="grid">
+    <div class="box"><h2>Thức ăn</h2>
+      ${row('Tổng từ ngày thả', `${num(report.feed.totalKg, 1)} kg (${report.feed.entries} lần ghi)`)}
+      ${row('7 ngày gần nhất', `${num(report.feed.last7DaysKg, 1)} kg`)}
+      ${row('FCR ước tính', report.fcr ? num(report.fcr, 2) : 'Chưa đủ dữ liệu (cần ≥ 2 lần cân mẫu)')}
+    </div>
+    <div class="box"><h2>Cảnh báo đã ghi nhận</h2>
+      ${report.alerts.length ? `<table><tr><th>Thời gian</th><th>Nội dung</th><th>Mức</th></tr>${report.alerts.map((a) => `<tr><td>${dateTime(a.ts)}</td><td>${e(a.title)}</td><td>${LEVEL[a.level]}</td></tr>`).join('')}</table>` : '<p class="muted">Không có cảnh báo nào được ghi nhận.</p>'}
+    </div>
+  </div>
+
+  <section><h2>Nhật ký sức khỏe (10 lần gần nhất)</h2>
+    ${report.healthLogs.length ? `<table><tr><th>Ngày</th><th>Tình trạng</th><th>Cá chết</th><th>TB (g/con)</th><th>Ghi chú</th></tr>${report.healthLogs.map((h) => `<tr><td>${dateTime(h.ts)}</td><td>${CONDITION[h.condition]}</td><td>${num(h.dead)}</td><td>${num(h.weight)}</td><td>${e(h.note || '—')}</td></tr>`).join('')}</table>` : '<p class="muted">Chưa có bản ghi sức khỏe.</p>'}
+  </section>
+
+  <p class="note">Báo cáo được tổng hợp tự động từ dữ liệu cảm biến và nhật ký vận hành trong hệ thống Pompano AI, dùng làm tài liệu tham khảo khi lập hồ sơ VietGAP. Đây <strong>không phải</strong> giấy chứng nhận VietGAP — chứng nhận chỉ do tổ chức chứng nhận được công nhận cấp.<br>Người lập: ........................................ &nbsp;&nbsp; Ký tên: ........................................</p>
+</div>
 </body>
-</html>
-  `
+</html>`
+}
 
-  const printWindow = window.open('', '_blank')
-  if (printWindow) {
-    printWindow.document.write(html)
-    printWindow.document.close()
+// Opens the report in a new tab; if pop-ups are blocked, downloads it as an HTML file instead.
+export function openEnvironmentReport(report: EnvironmentReport): 'opened' | 'downloaded' {
+  const url = URL.createObjectURL(new Blob([renderEnvironmentReport(report)], { type: 'text/html;charset=utf-8' }))
+  const opened = window.open(url, '_blank')
+  if (!opened) {
+    const link = Object.assign(document.createElement('a'), { href: url, download: `${report.reportId}.html` })
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
   }
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  return opened ? 'opened' : 'downloaded'
 }

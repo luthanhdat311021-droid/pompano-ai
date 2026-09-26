@@ -73,12 +73,13 @@ function seed(now: number): FarmState {
       for (const hour of [7, 16]) {
         const ts = today - day * DAY + hour * 3_600_000
         if (ts > now) continue
-        const kg = Math.round((pond.fish * 0.0017 + (Math.random() - 0.5) * 3) * 10) / 10
+        // ~1.5% of body weight per day in two feedings, giving an FCR around 1.7 with the growth below.
+        const kg = Math.round((pond.fish * 0.0028 + (Math.random() - 0.5) * 3) * 10) / 10
         feedLogs.push({ id: uid(), pondId: pond.id, kg, type: FEED_TYPES[hour === 7 ? 0 : 1], ts, note: '' })
       }
       if (day % 3 === 0) {
         const ts = today - day * DAY + 9 * 3_600_000
-        if (ts <= now) healthLogs.push({ id: uid(), pondId: pond.id, dead: 5 + Math.floor(Math.random() * 20), weight: Math.round(360 - day * 4 + Math.random() * 20), condition: pond.id === 'A02' && day === 0 ? 'watch' : 'good', ts, note: pond.id === 'A02' && day === 0 ? 'Cá bơi lờ đờ vào buổi trưa' : '' })
+        if (ts <= now) healthLogs.push({ id: uid(), pondId: pond.id, dead: 5 + Math.floor(Math.random() * 20), weight: Math.round(360 - day * 3.2 + Math.random() * 3), condition: pond.id === 'A02' && day === 0 ? 'watch' : 'good', ts, note: pond.id === 'A02' && day === 0 ? 'Cá bơi lờ đờ vào buổi trưa' : '' })
       }
     }
   }

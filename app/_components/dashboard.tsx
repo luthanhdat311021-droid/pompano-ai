@@ -1,15 +1,14 @@
 'use client'
 
-import { useState } from 'react'
-import { Check, CheckCheck, ChevronRight, Download, Eye, List, MoreHorizontal, Sparkles } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Check, CheckCheck, ChevronRight, Download, Eye, FileText, List, MoreHorizontal, Sparkles } from 'lucide-react'
 import { useFarm } from '@/lib/farm-store'
+import { forecastPond, riskiestForecast } from '@/lib/predictive-ai'
 import { OFFLINE_AFTER_MS, issueKey, timeAgo, type Issue, type Limits } from '@/lib/telemetry'
 import { useTelemetry } from '@/lib/use-telemetry'
+import { buildEnvironmentReport, openEnvironmentReport } from '@/lib/vietgap-export'
 import { AlertItem, ChartLegend, PondCard, QualitySummary, WaterChart, readingsCsv, useFarmIssues, useRangeHistory } from './shared'
 import { Menu, RANGES, StatCard, downloadCsv, formatNumber, useAppUI } from './ui'
-
-import { predictPondMetrics } from '@/lib/predictive-ai'
-import { buildVietGAPData, openPrintableVietGAPReport } from '@/lib/vietgap-export'
 
 export const adviceFor: Record<Issue['metric'], string> = {
   ph: 'Kiểm tra hệ thống cấp nước và theo dõi pH trong 30 phút tiếp theo.',
@@ -35,34 +34,38 @@ export function useSurvivalRate(pondIds?: string[]) {
 }
 
 function WaterQuality() {
-  const { farmPonds } = useFarm()
+  const { farm, farmPonds, feedLogs, healthLogs, notices, settings } = useFarm()
+  const { history } = useTelemetry()
   const { range, navigate, notify } = useAppUI()
   const [selected, setSelected] = useState(farmPonds[0]?.id ?? '')
   const pondId = farmPonds.some((pond) => pond.id === selected) ? selected : farmPonds[0]?.id ?? ''
   const readings = useRangeHistory(pondId, RANGES[range].ms)
 
-  const handleExportVietGAP = () => {
-    const pond = farmPonds.find((p) => p.id === pondId) || farmPonds[0]
-    const data = buildVietGAPData(pond.id, pond.name, readings, pond.fish, pond.area)
-    openPrintableVietGAPReport(data)
-    notify(`Đã tạo Báo cáo VietGAP & Mã QR Truy xuất nguồn gốc cho Ao ${pond.id}`)
+  const exportReport = () => {
+    const pond = farmPonds.find((item) => item.id === pondId)
+    if (!pond) return notify('Chưa có ao để lập báo cáo')
+    const report = buildEnvironmentReport({ farmName: farm.name, pond, readings: history[pond.id] ?? [], limits: settings.limits, feedLogs, healthLogs, notices })
+    const result = openEnvironmentReport(report)
+    notify(result === 'opened' ? `Đã mở nhật ký môi trường ${pond.name}` : `Trình duyệt chặn cửa sổ mới — đã tải về ${report.reportId}.html`)
   }
 
   return <section className="card water-card">
-    <div className="section-header"><div><h2>Chất lượng nước & Truy xuất Nguồn gốc</h2><p>Theo dõi các chỉ số môi trường theo thời gian thực · {RANGES[range].label}</p></div><div className="chart-controls"><div className="segmented">{farmPonds.map((pond) => <button className={pondId === pond.id ? 'selected' : ''} key={pond.id} onClick={() => setSelected(pond.id)}>{pond.id}</button>)}</div><Menu label="Tùy chọn biểu đồ" trigger={<MoreHorizontal />} width={230} items={[
-      { label: 'Xuất Báo Cáo VietGAP (PDF/QR)', icon: Download, onSelect: handleExportVietGAP },
+    <div className="section-header"><div><h2>Chất lượng nước</h2><p>Theo dõi các chỉ số môi trường theo thời gian thực · {RANGES[range].label}</p></div><div className="chart-controls"><div className="segmented">{farmPonds.map((pond) => <button className={pondId === pond.id ? 'selected' : ''} key={pond.id} onClick={() => setSelected(pond.id)}>{pond.id}</button>)}</div><Menu label="Tùy chọn biểu đồ" trigger={<MoreHorizontal />} width={240} items={[
+      { label: 'Nhật ký môi trường (VietGAP)', icon: FileText, onSelect: exportReport },
       { label: 'Xem chi tiết ao', icon: Eye, onSelect: () => navigate(`pond:${pondId}`) },
       { label: 'Xuất dữ liệu CSV', icon: Download, onSelect: () => { if (!readings.length) return notify('Chưa có dữ liệu để xuất'); downloadCsv(`chat-luong-nuoc-${pondId}.csv`, readingsCsv(pondId, readings)); notify(`Đã xuất ${readings.length} bản ghi của ao ${pondId}`) } },
     ]} /></div></div>
-    <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-      <button className="outline-button" style={{ fontSize: '13px', background: '#e0f2fe', color: '#0369a1', borderColor: '#bae6fd' }} onClick={handleExportVietGAP}>
-        <Download style={{ width: 14, height: 14, marginRight: 4 }} /> Xuất Chứng Nhận VietGAP & QR Code Truy Xuất
-      </button>
-    </div>
+    <div className="report-row"><button className="outline-button report-button" onClick={exportReport}><FileText /> Nhật ký môi trường VietGAP · Ao {pondId}</button></div>
     <ChartLegend />
     <div className="chart-wrap"><WaterChart readings={readings} /></div>
     <QualitySummary readings={readings} />
   </section>
+}
+
+const RISK_STYLE = {
+  critical: { label: 'NGUY CƠ CAO', color: '#c75d4d' },
+  warning: { label: 'CẦN CHÚ Ý', color: '#d18c26' },
+  safe: { label: 'ỔN ĐỊNH', color: '#23a88a' },
 }
 
 function AICard() {
@@ -70,59 +73,42 @@ function AICard() {
   const { latest, history, now } = useTelemetry()
   const { farmPonds, settings, acknowledge } = useFarm()
   const { navigate, notify } = useAppUI()
-
-  // Calculate Predictive AI Insights for primary pond
-  const activePond = farmPonds[0]
-  const pondHistory = history[activePond?.id ?? 'A01'] ?? []
-  const pondLatest = latest[activePond?.id ?? 'A01']
-  const prediction = predictPondMetrics(activePond?.id ?? 'A01', pondHistory, pondLatest, settings.limits)
-
+  // Recompute forecasts at most every 10s, keyed on the newest reading, to avoid churn on every tick.
+  const bucket = Math.floor(now / 10_000)
+  const loadedPonds = Object.keys(history).length
+  const forecast = useMemo(
+    () => riskiestForecast(farmPonds.map((pond) => forecastPond(pond.id, history[pond.id] ?? [], settings.limits))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bucket, loadedPonds, farmPonds, settings.limits],
+  )
   const top = open[0]
   const online = farmPonds.filter((pond) => latest[pond.id])
   const lastUpdate = Math.max(0, ...online.map((pond) => latest[pond.id].ts))
   const metricCount = online.length * 3
-  const tone = prediction.riskLevel === 'critical' ? '#c75d4d' : prediction.riskLevel === 'warning' ? '#d18c26' : '#23a88a'
+  const tone = top?.level === 'danger' ? '#c75d4d' : top?.level === 'info' ? '#397caf' : undefined
+  const risk = forecast ? RISK_STYLE[forecast.risk] : RISK_STYLE.safe
+  const fmt = (value: number, digits: number) => (Number.isFinite(value) ? value.toFixed(digits) : '—')
 
   return <section className="card ai-card">
-    <div className="section-header"><div><div className="card-icon-title"><span className="ai-icon"><Sparkles /></span><div><h2>AI Dự Báo Sớm & Năng Lượng</h2><p>Dự báo xu hướng 2-4h & Tối ưu điện quạt nước</p></div></div></div><span className="demo-badge" style={{ background: '#e0f2fe', color: '#0369a1' }}>Thuật toán Predictive AI</span></div>
-    
-    {/* Predictive Risk Banner */}
-    <div className="ai-alert" style={{ borderLeftColor: tone }}>
-      <div className="ai-alert-top">
-        <span className="risk-label" style={{ color: tone }}><span style={{ background: tone }} /> {prediction.riskLevel === 'critical' ? 'NGUY CƠ NGẠT KHÍ DỰ BÁO' : prediction.riskLevel === 'warning' ? 'CẢNH BÁO AI XU HƯỚNG' : 'DỰ BÁO AN TOÀN (4H)'}</span>
-        <span className="ai-time">{timeAgo(now, now)}</span>
-      </div>
-      <h3>Ao {prediction.pondId}: {prediction.riskTitle}</h3>
-      <p style={{ marginTop: 4, marginBottom: 8, fontSize: '13px', lineHeight: '1.4' }}>{prediction.riskDetail}</p>
-      
-      {/* 4-Hour DO Forecast Metrics */}
-      <div className="ai-facts" style={{ marginTop: 8, gridTemplateColumns: 'repeat(3, 1fr)', background: '#f8fafc', padding: '8px', borderRadius: '6px' }}>
-        <div><span>Oxy Hiện tại</span><strong>{prediction.oxygen.current.toFixed(2)} mg/L</strong></div>
-        <div><span>Dự báo 2 tiếng</span><strong style={{ color: prediction.oxygen.predicted2h < 4.5 ? '#c75d4d' : '#0369a1' }}>{prediction.oxygen.predicted2h.toFixed(2)} mg/L</strong></div>
-        <div><span>Dự báo 4 tiếng</span><strong style={{ color: prediction.oxygen.predicted4h < 4.0 ? '#c75d4d' : '#16a34a' }}>{prediction.oxygen.predicted4h.toFixed(2)} mg/L</strong></div>
-      </div>
-
-      {/* Smart Energy & Aerator Optimization */}
-      <div style={{ marginTop: 10, padding: '8px 10px', background: '#ecfdf5', borderRadius: '6px', border: '1px solid #a7f3d0' }}>
-        <div style={{ fontSize: '12px', fontWeight: 6, color: '#065f46', display: 'flex', justifyContent: 'space-between' }}>
-          <span>⚡ Tối Ưu Năng Lượng Chạy Quạt Nước AI:</span>
-          <span>Tiết kiệm ~{prediction.estimatedMoneySavedVnd.toLocaleString('vi-VN')} đ/tháng/ao</span>
-        </div>
-        <div style={{ fontSize: '12px', color: '#047857', marginTop: 2 }}>
-          Lịch sục khí đề xuất: <strong>{prediction.recommendedAeratorTime}</strong>
-        </div>
-      </div>
-
-      <div className="ai-actions" style={{ marginTop: 12 }}>
-        <button className="text-button" onClick={() => navigate('AI phân tích')}>Phân tích AI chuyên sâu <ChevronRight /></button>
-        {top && <button className="text-button" onClick={() => { acknowledge([issueKey(top)]); notify('Đã xác nhận cảnh báo') }}><Check /> Đã xử lý</button>}
-      </div>
-    </div>
-
-    <div className="ai-footer">
-      <span><Check /> Mô hình Regression & Bio-Oxygen Demand (BOD)</span>
-      <span>{lastUpdate ? `Cập nhật ${timeAgo(lastUpdate, now)}` : 'Chờ dữ liệu'}</span>
-    </div>
+    <div className="section-header"><div><div className="card-icon-title"><span className="ai-icon"><Sparkles /></span><div><h2>AI phân tích & dự báo</h2><p>Cảnh báo hiện tại và xu hướng 4 giờ tới</p></div></div></div><span className="demo-badge">Ước tính xu hướng</span></div>
+    {top && <div className="ai-alert" style={tone ? { borderLeftColor: tone } : undefined}>
+      <div className="ai-alert-top"><span className="risk-label" style={tone ? { color: tone } : undefined}><span style={tone ? { background: tone } : undefined} /> {top.level === 'danger' ? 'NGUY HIỂM' : top.level === 'warning' ? 'CẢNH BÁO' : 'THÔNG TIN'}</span><span className="ai-time">{timeAgo(top.ts, now)}</span></div>
+      <h3>{top.metric === 'offline' ? `Thiết bị tại Ao ${top.pondId} đang mất kết nối.` : `Ao ${top.pondId}: ${top.title.toLowerCase()} (${top.value}).`}</h3>
+      <p>{adviceFor[top.metric]} Tham chiếu: {referenceFor(top.metric, settings.limits)}.</p>
+      <div className="ai-actions"><button className="text-button" onClick={() => navigate(`pond:${top.pondId}`)}>Xem chi tiết ao <ChevronRight /></button><button className="text-button" onClick={() => { acknowledge([issueKey(top)]); notify('Đã xác nhận cảnh báo') }}><Check /> Đã xử lý</button></div>
+    </div>}
+    {forecast ? <div className="forecast-box" style={{ borderLeftColor: forecast.ready ? risk.color : undefined }}>
+      <div className="ai-alert-top"><span className="risk-label" style={{ color: forecast.ready ? risk.color : undefined }}><span style={{ background: forecast.ready ? risk.color : undefined }} /> DỰ BÁO 4 GIỜ · {forecast.ready ? risk.label : 'ĐANG HỌC'}</span><span className="ai-time">Ao {forecast.pondId}{farmPonds.length > 1 ? ` · rủi ro nhất / ${farmPonds.length} ao` : ''}</span></div>
+      <h3>{forecast.title}</h3>
+      <p className="forecast-detail">{forecast.detail}</p>
+      {forecast.ready && <>
+        <div className="forecast-grid"><div><span>Oxy hiện tại</span><strong>{fmt(forecast.oxygen.current, 2)}</strong></div><div><span>Sau 2 giờ</span><strong className={forecast.oxygen.in2h < settings.limits.oxygen.min ? 'bad' : ''}>{fmt(forecast.oxygen.in2h, 2)}</strong></div><div><span>Sau 4 giờ</span><strong className={forecast.oxygen.in4h < settings.limits.oxygen.min ? 'bad' : ''}>{fmt(forecast.oxygen.in4h, 2)}</strong></div></div>
+        <p className="forecast-meta">Oxy hòa tan (mg/L) · pH sau 4 giờ ~{fmt(forecast.ph.in4h, 2)} · nhiệt độ ~{fmt(forecast.temp.in4h, 1)}°C</p>
+        <div className="aeration-box"><strong>Quạt nước:</strong> {forecast.aeration}{forecast.steps.length > 0 && <ul>{forecast.steps.map((step) => <li key={step}>{step}</li>)}</ul>}</div>
+      </>}
+      {!top && <button className="text-button" onClick={() => navigate('AI phân tích')}>Xem phân tích chi tiết <ChevronRight /></button>}
+    </div> : <div className="forecast-box"><h3>Chưa có ao để dự báo</h3></div>}
+    <div className="ai-footer"><span><Check /> Đã phân tích {metricCount} chỉ số</span><span>{lastUpdate ? `Cập nhật ${timeAgo(lastUpdate, now)}` : 'Chưa có dữ liệu'}</span></div>
   </section>
 }
 
