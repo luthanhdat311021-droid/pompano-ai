@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "author": "Pompano AI",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 120, "left": 150, "attrs": {} },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_normal",
+      "top": -40,
+      "left": 360,
+      "attrs": { "color": "green", "label": "NORMAL" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_spike",
+      "top": 30,
+      "left": 360,
+      "attrs": { "color": "red", "label": "SPIKE" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_drift",
+      "top": 100,
+      "left": 360,
+      "attrs": { "color": "yellow", "label": "DRIFT" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_stuck",
+      "top": 170,
+      "left": 360,
+      "attrs": { "color": "blue", "label": "STUCK" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_green",
+      "top": -20,
+      "left": 100,
+      "attrs": { "color": "green" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_yellow",
+      "top": 40,
+      "left": 100,
+      "attrs": { "color": "yellow" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_red",
+      "top": 100,
+      "left": 100,
+      "attrs": { "color": "red" }
+    },
+    {
+      "type": "wokwi-potentiometer",
+      "id": "pot_ph",
+      "top": 200,
+      "left": -20,
+      "attrs": { "label": "pH Sensor" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "btn_normal:2.1", "esp:GND", "black", [ "v0" ] ],
+    [ "btn_normal:1.1", "esp:12", "green", [ "v0" ] ],
+    [ "btn_spike:2.1", "esp:GND", "black", [ "v0" ] ],
+    [ "btn_spike:1.1", "esp:14", "red", [ "v0" ] ],
+    [ "btn_drift:2.1", "esp:GND", "black", [ "v0" ] ],
+    [ "btn_drift:1.1", "esp:27", "yellow", [ "v0" ] ],
+    [ "btn_stuck:2.1", "esp:GND", "black", [ "v0" ] ],
+    [ "btn_stuck:1.1", "esp:26", "blue", [ "v0" ] ],
+    [ "led_green:C", "esp:GND", "black", [ "v0" ] ],
+    [ "led_green:A", "esp:18", "green", [ "v0" ] ],
+    [ "led_yellow:C", "esp:GND", "black", [ "v0" ] ],
+    [ "led_yellow:A", "esp:19", "yellow", [ "v0" ] ],
+    [ "led_red:C", "esp:GND", "black", [ "v0" ] ],
+    [ "led_red:A", "esp:21", "red", [ "v0" ] ],
+    [ "pot_ph:GND", "esp:GND", "black", [ "v0" ] ],
+    [ "pot_ph:VCC", "esp:3V3", "red", [ "v0" ] ],
+    [ "pot_ph:SIG", "esp:34", "blue", [ "v0" ] ]
+  ]
+}
